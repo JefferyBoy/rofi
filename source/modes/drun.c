@@ -135,6 +135,8 @@ typedef struct {
   uint32_t icon_fetch_size;
   /* Type of desktop file */
   DRunDesktopEntryType type;
+  /** drun自定义配置的terminal */
+  bool terminal;
 } DRunModeEntry;
 
 typedef struct {
@@ -359,7 +361,7 @@ static void exec_cmd_entry(DRunModeEntry *e, const char *path) {
   }
   g_debug("Parsed command: |%s| into |%s|.", e->exec, str);
 
-  if (e->key_file == NULL) {
+  if (e->key_file == NULL && e->path != NULL) {
     GKeyFile *kf = g_key_file_new();
     GError *key_error = NULL;
     gboolean res = g_key_file_load_from_file(kf, e->path, 0, &key_error);
@@ -377,7 +379,7 @@ static void exec_cmd_entry(DRunModeEntry *e, const char *path) {
 
   const gchar *fp = g_strstrip(str);
   gchar *exec_path =
-      g_key_file_get_string(e->key_file, e->action, "Path", NULL);
+      e->key_file == NULL ? NULL : g_key_file_get_string(e->key_file, e->action, "Path", NULL);
   if (exec_path != NULL && strlen(exec_path) == 0) {
     // If it is empty, ignore this property. (#529)
     g_free(exec_path);
@@ -390,7 +392,7 @@ static void exec_cmd_entry(DRunModeEntry *e, const char *path) {
       .app_id = e->app_id,
   };
   gboolean sn =
-      g_key_file_get_boolean(e->key_file, e->action, "StartupNotify", NULL);
+      e->key_file == NULL ? FALSE : g_key_file_get_boolean(e->key_file, e->action, "StartupNotify", NULL);
   gchar *wmclass = NULL;
   if (sn &&
       g_key_file_has_key(e->key_file, e->action, "StartupWMClass", NULL)) {
@@ -401,12 +403,14 @@ static void exec_cmd_entry(DRunModeEntry *e, const char *path) {
   // Returns false if not found, if key not found, we don't want run in
   // terminal.
   gboolean terminal =
-      g_key_file_get_boolean(e->key_file, e->action, "Terminal", NULL);
+      e->key_file == NULL ? e->terminal : g_key_file_get_boolean(e->key_file, e->action, "Terminal", NULL);
   if (helper_execute_command(exec_path, fp, terminal, sn ? &context : NULL)) {
-    char *drun_cach_path = g_build_filename(cache_dir, DRUN_CACHE_FILE, NULL);
-    // Store it based on the unique identifiers (desktop_id).
-    history_set(drun_cach_path, e->desktop_id);
-    g_free(drun_cach_path);
+    if(e->desktop_id != NULL) {
+      char *drun_cach_path = g_build_filename(cache_dir, DRUN_CACHE_FILE, NULL);
+      // Store it based on the unique identifiers (desktop_id).
+      history_set(drun_cach_path, e->desktop_id);
+      g_free(drun_cach_path);
+    }
   }
   g_free(wmclass);
   g_free(exec_path);
@@ -722,6 +726,93 @@ static void read_desktop_file(DRunModePrivateData *pd, const char *root,
     g_strfreev(actions);
   }
   return;
+}
+
+static void read_drun_custom_config_file(DRunModePrivateData *pd,
+                                         const char *filepath) {
+    FILE *fp = fopen(filepath, "r");
+    if (fp == NULL) {
+        g_warning("Failed to open custom config file: %s", filepath);
+        return;
+    }
+    char *line = NULL;
+    size_t len = 0;
+    DRunModeEntry *entry = NULL;
+    while (getline(&line, &len, fp) != -1) {
+        // remove trailing newline
+        line[strcspn(line, "\n")] = 0;
+        // skip empty lines and comments
+        if (line[0] == '#' || line[0] == '\0') {
+            g_free(line);
+            line = NULL;
+            continue;
+        }
+        if (strcmp(line, "[Entry]") == 0) {
+            // entry扩容
+            if (pd->cmd_list_length >= pd->cmd_list_length_actual) {
+                pd->cmd_list_length_actual += 50;
+                pd->entry_list =
+                        g_realloc(pd->entry_list,
+                                  pd->cmd_list_length_actual * sizeof(*(pd->entry_list)));
+            }
+            // entry添加到entry_list
+            if (entry != NULL && entry->name != NULL && entry->exec != NULL) {
+                pd->cmd_list_length += 1;
+                entry->key_file = NULL;
+            }
+            // entry初始化
+            memset(&pd->entry_list[pd->cmd_list_length], 0, sizeof(DRunModeEntry));
+            entry = &pd->entry_list[pd->cmd_list_length];
+            entry->type = DRUN_DESKTOP_ENTRY_TYPE_APPLICATION;
+            continue;
+        } else {
+            if (entry == NULL) {
+                g_free(line);
+                line = NULL;
+                continue;
+            }
+        }
+        // parse line
+        char *key = line;
+        char *value = strchr(line, '=');
+        if (value == NULL) {
+            g_warning("Invalid line in custom config file: %s", line);
+            g_free(line);
+            line = NULL;
+            continue;
+        }
+        *value = '\0';
+        value++;
+        // remove leading and trailing whitespace
+        key = g_strstrip(key);
+        value = g_strstrip(value);
+        if (strcmp(key, "Name") == 0) {
+            entry->name = malloc(strlen(value));
+            strcpy(entry->name, value);
+        }
+        if (strcmp(key, "Exec") == 0) {
+            entry->exec = malloc(strlen(value));
+            strcpy(entry->exec, value);
+        }
+        if (strcmp(key, "Comment") == 0) {
+            entry->comment = malloc(strlen(value));
+            strcpy(entry->comment, value);
+        }
+        if (strcmp(key, "Icon") == 0) {
+            entry->icon_name = malloc(strlen(value));
+            strcpy(entry->icon_name, value);
+        }
+        if (strcmp(key, "Terminal") == 0) {
+          entry->terminal = !strcmp(value, "true");
+        }
+        g_free(line);
+        line = NULL;
+    }
+    // entry添加到entry_list
+    if (entry != NULL && entry->name != NULL && entry->exec != NULL) {
+        pd->cmd_list_length += 1;
+        entry->key_file = NULL;
+    }
 }
 
 /**
@@ -1070,7 +1161,23 @@ static void get_apps(DRunModePrivateData *pd) {
       }
       TICK_N("Get Desktop apps (system dirs)");
     }
-    get_apps_history(pd);
+
+        /** 读取用户配置文件，解析添加运行项，不用添加dekstop文件*/
+        p = rofi_theme_find_property(wid, P_BOOLEAN, "parse-system-config", TRUE);
+        if (p == NULL || (p->type == P_BOOLEAN && p->value.b)) {
+            const char *config_dir = g_get_user_config_dir();
+            char *config_file =
+                    g_build_filename(config_dir, "/rofi/drun.conf", NULL);
+            if (g_file_test(config_file, G_FILE_TEST_EXISTS)) {
+                read_drun_custom_config_file(pd, config_file);
+            }
+            if (config_file) {
+                g_free(config_file);
+            }
+            TICK_N("Get Desktop apps (custom drun config file)");
+        }
+
+        get_apps_history(pd);
 
     g_qsort_with_data(pd->entry_list, pd->cmd_list_length,
                       sizeof(DRunModeEntry), drun_int_sort_list, NULL);
