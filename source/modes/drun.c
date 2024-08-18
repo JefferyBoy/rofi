@@ -56,6 +56,7 @@
 #include "xcb.h"
 
 #include "rofi-icon-fetcher.h"
+#include <stdbool.h>
 
 /** The filename of the history cache file. */
 #define DRUN_CACHE_FILE "rofi3.druncache"
@@ -747,7 +748,7 @@ static void read_drun_custom_config_file(DRunModePrivateData *pd,
             line = NULL;
             continue;
         }
-        if (strcmp(line, "[Entry]") == 0) {
+        if (strcmp(line, "[Desktop Entry]") == 0) {
             // entry扩容
             if (pd->cmd_list_length >= pd->cmd_list_length_actual) {
                 pd->cmd_list_length_actual += 50;
@@ -775,6 +776,7 @@ static void read_drun_custom_config_file(DRunModePrivateData *pd,
         // parse line
         char *key = line;
         char *value = strchr(line, '=');
+        size_t value_len = 0;
         if (value == NULL) {
             g_warning("Invalid line in custom config file: %s", line);
             g_free(line);
@@ -786,20 +788,21 @@ static void read_drun_custom_config_file(DRunModePrivateData *pd,
         // remove leading and trailing whitespace
         key = g_strstrip(key);
         value = g_strstrip(value);
+        value_len = strlen(value) + 1;
         if (strcmp(key, "Name") == 0) {
-            entry->name = malloc(strlen(value));
+            entry->name = malloc(value_len);
             strcpy(entry->name, value);
         }
         if (strcmp(key, "Exec") == 0) {
-            entry->exec = malloc(strlen(value));
+            entry->exec = malloc(value_len);
             strcpy(entry->exec, value);
         }
         if (strcmp(key, "Comment") == 0) {
-            entry->comment = malloc(strlen(value));
+            entry->comment = malloc(value_len);
             strcpy(entry->comment, value);
         }
         if (strcmp(key, "Icon") == 0) {
-            entry->icon_name = malloc(strlen(value));
+            entry->icon_name = malloc(value_len);
             strcpy(entry->icon_name, value);
         }
         if (strcmp(key, "Terminal") == 0) {
